@@ -131,6 +131,10 @@ export function resolveRemote (nodeModules, parentTarget, name, version, isExpli
 		case 'remote':
 			return resolveFromTarball(nodeModules, parentTarget, parsedSpec)
 		case 'hosted':
+			log(parsedSpec.hosted.sshUrl)
+			if (/^git\+ssh/.test(parsedSpec.hosted.sshUrl)) {
+				return resolveFromGit(nodeModules, parentTarget, parsedSpec)
+			}
 			return resolveFromHosted(nodeModules, parentTarget, parsedSpec)
 		default:
 			throw new Error(`Unknown package spec: ${parsedSpec.type} for ${name}`)
@@ -214,6 +218,37 @@ export function resolveFromHosted (nodeModules, parentTarget, parsedSpec) {
 		::map(pkgJson => {
 			pkgJson.dist = {tarball, shasum} // eslint-disable-line no-param-reassign
 			log(`resolved ${name}@${ref} to commit shasum ${shasum} from ${provider}`)
+			return {parentTarget, pkgJson, target: shasum, name: pkgJson.name, type, fetch}
+		})
+}
+
+/**
+ * resolve a dependency's `package.json` file from a Git repository. Requires
+ * a git binary to be available in $PATH.
+ * @param	{String} nodeModules - `node_modules` base directory.
+ * @param	{String} parentTarget - relative parent's node_modules path.
+ * @param	{Object} parsedSpec - parsed package name and specifier.
+ * @return {Observable} - observable sequence of `package.json` objects.
+ */
+export function resolveFromGit (nodeModules, parentTarget, parsedSpec) {
+	const {raw, name, type, hosted} = parsedSpec
+	log(`resolving ${raw} from ${hosted.type} using git`)
+
+	const [repo, ref = 'master'] = hosted.ssh.split('#')
+	let shasum
+
+	// use the commit id as the shasum; commit ids are (mostly) immutable! :D
+	return registry.getGitCommitId(repo, ref)
+		::mergeMap(commitId => {
+			shasum = commitId
+			log(`resolved ${name}@${ref} to commit shasum ${shasum} from git`)
+			return registry.clone(repo, commitId)
+		})
+		::mergeMap(tmpDir => util.readFileJSON(path.join(tmpDir, 'package.json')))
+		::map(pkgJson => {
+			pkgJson.dist = {tarball: parsedSpec.hosted.sshUrl, shasum} // eslint-disable-line
+			// `registry.clone` will add a tarball to the cache so the `fetch` function
+			// won't end up hitting `download`.
 			return {parentTarget, pkgJson, target: shasum, name: pkgJson.name, type, fetch}
 		})
 }
